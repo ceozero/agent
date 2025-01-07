@@ -126,92 +126,89 @@ func GetHost() *model.Host {
 	return &ret
 }
 
+// GetState 获取主机状态信息
 func GetState(skipConnectionCount bool, skipProcsCount bool) *model.HostState {
-	var ret model.HostState
+    var ret model.HostState
 
-	cp := tryStat(context.Background(), CPU, cpu.GetState)
-	if len(cp) > 0 {
-		ret.CPU = cp[0]
-	}
+    cp := tryStat(context.Background(), CPU, cpu.GetState)
+    if len(cp) > 0 {
+        ret.CPU = cp[0]
+    }
 
-	vm, err := mem.VirtualMemory()
-	if err != nil {
-		printf("mem.VirtualMemory error: %v", err)
-	} else {
-		ret.MemUsed = vm.Total - vm.Available
-		if runtime.GOOS != "windows" {
-			ret.SwapUsed = vm.SwapTotal - vm.SwapFree
-		}
-	}
-	if runtime.GOOS == "windows" {
-		// gopsutil 在 Windows 下不能正确取 swap
-		ms, err := mem.SwapMemory()
-		if err != nil {
-			printf("mem.SwapMemory error: %v", err)
-		} else {
-			ret.SwapUsed = ms.Used
-		}
-	}
+    vm, err := mem.VirtualMemory()
+    if err != nil {
+        printf("mem.VirtualMemory error: %v", err)
+    } else {
+        ret.MemUsed = vm.Total - vm.Available
+        if runtime.GOOS != "windows" {
+            ret.SwapUsed = vm.SwapTotal - vm.SwapFree
+        }
+    }
+    if runtime.GOOS == "windows" {
+        ms, err := mem.SwapMemory()
+        if err != nil {
+            printf("mem.SwapMemory error: %v", err)
+        } else {
+            ret.SwapUsed = ms.Used
+        }
+    }
 
-	ret.DiskUsed = getDiskUsed()
+    ret.DiskUsed = getDiskUsed()
 
-	loadStat := tryStat(context.Background(), Load, load.GetState)
-	ret.Load1 = loadStat.Load1
-	ret.Load5 = loadStat.Load5
-	ret.Load15 = loadStat.Load15
+    loadStat := tryStat(context.Background(), Load, load.GetState)
+    ret.Load1 = loadStat.Load1
+    ret.Load5 = loadStat.Load5
+    ret.Load15 = loadStat.Load15
 
-	var procs []int32
-	if !skipProcsCount {
-		procs, err = process.Pids()
-		if err != nil {
-			printf("process.Pids error: %v", err)
-		} else {
-			ret.ProcessCount = uint64(len(procs))
-		}
-	}
+    if agentConfig.Temperature {
+        go updateTemperatureStat()
+        ret.Temperatures = temperatureStat
+    }
 
-	if agentConfig.Temperature {
-		go updateTemperatureStat()
-		ret.Temperatures = temperatureStat
-	}
+    if agentConfig.GPU {
+        ret.GPU = tryStat(context.Background(), GPU, gpu.GetState)
+    }
 
-	if agentConfig.GPU {
-		ret.GPU = tryStat(context.Background(), GPU, gpu.GetState)
-	}
+    ret.NetInTransfer, ret.NetOutTransfer = netInTransfer, netOutTransfer
+    ret.NetInSpeed, ret.NetOutSpeed = netInSpeed, netOutSpeed
+    ret.Uptime = uint64(time.Since(cachedBootTime).Seconds())
 
-	ret.NetInTransfer, ret.NetOutTransfer = netInTransfer, netOutTransfer
-	ret.NetInSpeed, ret.NetOutSpeed = netInSpeed, netOutSpeed
-	ret.Uptime = uint64(time.Since(cachedBootTime).Seconds())
+    printf("Host State - NetInTransfer: %d, NetOutTransfer: %d, NetInSpeed: %d, NetOutSpeed: %d, Uptime: %d",
+        ret.NetInTransfer, ret.NetOutTransfer, ret.NetInSpeed, ret.NetOutSpeed, ret.Uptime)
 
-	if !skipConnectionCount {
-		ret.TcpConnCount, ret.UdpConnCount = getConns()
-	}
+    if !skipConnectionCount {
+        ret.TcpConnCount, ret.UdpConnCount = getConns()
+    }
 
-	return &ret
+    return &ret
 }
 
 // TrackNetworkSpeed NIC监控，统计流量与速度
 func TrackNetworkSpeed() {
-	var innerNetInTransfer, innerNetOutTransfer uint64
+    var innerNetInTransfer, innerNetOutTransfer uint64
 
-	ctx := context.WithValue(context.Background(), nic.NICKey, agentConfig.NICAllowlist)
-	nc, err := nic.GetState(ctx)
-	if err != nil {
-		return
-	}
+    ctx := context.WithValue(context.Background(), nic.NICKey, agentConfig.NICAllowlist)
+    nc, err := nic.GetState(ctx)
+    if err != nil {
+        printf("TrackNetworkSpeed error: %v", err)
+        return
+    }
 
-	innerNetInTransfer = nc[0]
-	innerNetOutTransfer = nc[1]
+    innerNetInTransfer = nc[0]
+    innerNetOutTransfer = nc[1]
 
-	now := uint64(time.Now().Unix())
-	diff := util.SubUintChecked(now, lastUpdateNetStats)
-	if diff > 0 {
-		netInSpeed = util.SubUintChecked(innerNetInTransfer, netInTransfer) / diff
-		netOutSpeed = util.SubUintChecked(innerNetOutTransfer, netOutTransfer) / diff
-	}
-	netInTransfer = innerNetInTransfer
-	netOutTransfer = innerNetOutTransfer
-	lastUpdateNetStats = now
+    now := uint64(time.Now().Unix())
+    diff := util.SubUintChecked(now, lastUpdateNetStats)
+    if diff > 0 {
+        netInSpeed = util.SubUintChecked(innerNetInTransfer, netInTransfer) / diff
+        netOutSpeed = util.SubUintChecked(innerNetOutTransfer, netOutTransfer) / diff
+    }
+    printf("Network Stats - InTransfer: %d, OutTransfer: %d, InSpeed: %d, OutSpeed: %d, LastUpdate: %d",
+        innerNetInTransfer, innerNetOutTransfer, netInSpeed, netOutSpeed, lastUpdateNetStats)
+
+    netInTransfer = innerNetInTransfer
+    netOutTransfer = innerNetOutTransfer
+    lastUpdateNetStats = now
 }
 
 func getDiskTotal() uint64 {
